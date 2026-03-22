@@ -1,16 +1,13 @@
 import logging
 import os
-import pickle
 import yaml
-import joblib
-import numpy as np
+import pickle
 import pandas as pd
 import lightgbm as lgb
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+# Logging configuration
 logger = logging.getLogger('model_building')
 logger.setLevel(logging.DEBUG)
 
@@ -27,46 +24,53 @@ file_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
 
 def load_data(file_path: str) -> pd.DataFrame:
+    """Load data from a CSV file."""
     try:
         df = pd.read_csv(file_path)
         df.fillna('', inplace=True)
-        logger.debug('Data loaded from %s', file_path)
+        logger.debug('Data loaded and NaNs filled from %s', file_path)
         return df
+    except pd.errors.ParserError as e:
+        logger.error('Failed to parse the CSV file: %s', e)
+        raise
     except Exception as e:
-        logger.error('Error loading data: %s', e)
+        logger.error('Unexpected error occurred while loading the data: %s', e)
         raise
 
 
-def apply_tfidf(train_data: pd.DataFrame, max_features: int, ngram_range: tuple):
+def apply_tfidf(train_data, max_features, ngram_range):
+    """Apply TF-IDF vectorization to the training data."""
     try:
-        models_dir = os.path.join(PROJECT_ROOT, 'artifacts', 'models')
-        os.makedirs(models_dir, exist_ok=True)
+        import joblib
+
+        os.makedirs('artifacts/models', exist_ok=True)
+        logger.debug("Created directory: artifacts/models")
+
+        tfidf_vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=ngram_range)
 
         text_column = 'clean_comment' if 'clean_comment' in train_data.columns else 'processed_text'
 
-        vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=ngram_range)
-        X_train = vectorizer.fit_transform(train_data[text_column])
+        X_train = tfidf_vectorizer.fit_transform(train_data[text_column])
 
-        label_column = 'category' if 'category' in train_data.columns else 'label'
-        y_train = train_data[label_column]
+        y_train = train_data['category'] if 'category' in train_data.columns else train_data['label']
 
-        vectorizer_path = os.path.join(models_dir, 'tfidf_vectorizer.pkl')
-        joblib.dump(vectorizer, vectorizer_path)
-        logger.debug('Vectorizer saved to %s', vectorizer_path)
+        vectorizer_path = os.path.join('artifacts/models', 'tfidf_vectorizer.pkl')
+        joblib.dump(tfidf_vectorizer, vectorizer_path)
+        logger.debug(f"TF-IDF vectorizer saved to {vectorizer_path}")
 
         return X_train, y_train
+
     except Exception as e:
-        logger.error('Failed to apply TF-IDF: %s', e)
+        logger.error(f"Failed to apply TF-IDF feature engineering: {e}")
         raise
 
 
-def train_lgbm(X_train, y_train, learning_rate: float, max_depth: int, n_estimators: int):
+def train_lgbm(X_train: np.ndarray, y_train: np.ndarray, learning_rate: float, max_depth: int, n_estimators: int):
+    """Train a LightGBM model using the provided training data and hyperparameters."""
     try:
-        model = lgb.LGBMClassifier(
+        best_model = lgb.LGBMClassifier(
             objective='multiclass',
             num_class=3,
             metric='multi_logloss',
@@ -74,35 +78,39 @@ def train_lgbm(X_train, y_train, learning_rate: float, max_depth: int, n_estimat
             class_weight='balanced',
             learning_rate=learning_rate,
             max_depth=max_depth,
-            n_estimators=n_estimators,
+            n_estimators=n_estimators
         )
-        model.fit(X_train, y_train)
+        best_model.fit(X_train, y_train)
         logger.debug('LightGBM model trained successfully')
-        return model
+        return best_model
     except Exception as e:
-        logger.error('Failed to train LightGBM: %s', e)
+        logger.error('Failed to train the LightGBM model: %s', e)
         raise
 
 
 def save_model(model, file_path: str) -> None:
+    """Save the trained model to a file."""
     try:
         with open(file_path, 'wb') as f:
             pickle.dump(model, f)
-        logger.debug('Model saved to %s', file_path)
+        logger.debug('Model saved successfully to %s', file_path)
     except Exception as e:
-        logger.error('Failed to save model: %s', e)
+        logger.error('Failed to save the model: %s', e)
         raise
 
 
 def load_params(params_path: str = "params.yaml") -> dict:
+    """Load parameters from a YAML file."""
     try:
-        full_path = os.path.join(PROJECT_ROOT, params_path)
-        with open(full_path, 'r') as f:
-            params = yaml.safe_load(f)
-        logger.debug('Parameters loaded from %s', full_path)
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        full_path = os.path.join(root_dir, params_path)
+
+        with open(full_path, 'r') as file:
+            params = yaml.safe_load(file)
+        logger.debug('Parameters retrieved from %s', full_path)
         return params
     except FileNotFoundError:
-        logger.error('params.yaml not found at %s', full_path)
+        logger.error('File not found: %s', full_path)
         raise
 
 
@@ -110,26 +118,28 @@ def main():
     try:
         params = load_params('params.yaml')
 
-        max_features  = params['model_building']['max_features']
-        ngram_range   = tuple(params['model_building']['ngram_range'])
+        max_features = params['model_building']['max_features']
+        ngram_range = tuple(params['model_building']['ngram_range'])
         learning_rate = params['model_building']['learning_rate']
-        max_depth     = params['model_building']['max_depth']
-        n_estimators  = params['model_building']['n_estimators']
+        max_depth = params['model_building']['max_depth']
+        n_estimators = params['model_building']['n_estimators']
 
-        logger.debug('Parameters: max_features=%s, ngram_range=%s', max_features, ngram_range)
+        logger.debug(f"Model parameters loaded: max_features={max_features}, ngram_range={ngram_range}")
 
-        train_path = os.path.join(PROJECT_ROOT, 'artifacts', 'interim', 'train_processed.csv')
-        train_data = load_data(train_path)
+        train_data = load_data('artifacts/interim/train_processed.csv')
 
-        X_train, y_train = apply_tfidf(train_data, max_features, ngram_range)
-        model = train_lgbm(X_train, y_train, learning_rate, max_depth, n_estimators)
+        X_train_tfidf, y_train = apply_tfidf(train_data, max_features, ngram_range)
 
-        model_path = os.path.join(PROJECT_ROOT, 'artifacts', 'models', 'lgbm_model.pkl')
-        save_model(model, model_path)
-        logger.debug('Model saved to %s', model_path)
+        best_model = train_lgbm(X_train_tfidf, y_train, learning_rate, max_depth, n_estimators)
+
+        os.makedirs('artifacts/models', exist_ok=True)
+
+        save_model(best_model, 'artifacts/models/lgbm_model.pkl')
+        logger.debug('Model saved to artifacts/models/lgbm_model.pkl')
 
     except KeyError as e:
-        logger.error('Missing key in params.yaml: %s', e)
+        logger.error(f"Missing key in params.yaml: {e}")
+        logger.error("Please ensure params.yaml contains all required model_building parameters")
         raise
 
 

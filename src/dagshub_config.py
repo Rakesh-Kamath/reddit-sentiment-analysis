@@ -1,30 +1,40 @@
 import os
-import mlflow
-import dagshub
 from dotenv import load_dotenv
+import dagshub
+import mlflow
 
-load_dotenv()
-
-DAGSHUB_USERNAME = os.getenv("DAGSHUB_USERNAME", "").strip()
-DAGSHUB_TOKEN    = os.getenv("DAGSHUB_TOKEN", "").strip()
-REPO_NAME        = os.getenv("REPO_NAME", "reddit-sentiment-analysis").strip()
-
-TRACKING_URI = f"https://dagshub.com/Rakesh-Kamath/reddit-sentiment-analysis.mlflow"
-
-
+# -------------------------------------------------
+# Initialize DagsHub + MLflow (AUTH FIRST)
+# -------------------------------------------------
 def setup_dagshub():
-    if DAGSHUB_TOKEN:
-        dagshub.auth.add_app_token(token=DAGSHUB_TOKEN)
+    load_dotenv()
 
+    DAGSHUB_USERNAME = os.getenv("DAGSHUB_USERNAME", "").strip()
+    DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "").strip()
+    REPO_NAME = os.getenv("REPO_NAME", "reddit-sentiment-analysis").strip()
+
+    if not DAGSHUB_USERNAME or not DAGSHUB_TOKEN:
+        raise RuntimeError("❌ DagsHub credentials not found in environment variables")
+
+    # 🔐 Authenticate with DagsHub FIRST
+    dagshub.auth.add_app_token(token=DAGSHUB_TOKEN)
+
+    # Set MLflow environment variables
     os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USERNAME
     os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
 
-    # This line properly initialises the DagsHub+MLflow connection
-    dagshub.init(repo_owner=DAGSHUB_USERNAME, repo_name=REPO_NAME, mlflow=True)
+    tracking_uri = f"https://dagshub.com/{DAGSHUB_USERNAME}/{REPO_NAME}.mlflow"
+    mlflow.set_tracking_uri(tracking_uri)
 
-    mlflow.set_tracking_uri(TRACKING_URI)
+    print(f"✅ DagsHub/MLflow initialized")
+    print(f"🔗 Tracking URI: {tracking_uri}")
+
     return mlflow
 
-
-def set_experiment(experiment_name: str = "dvc-pipeline-runs"):
+# -------------------------------------------------
+# Set / create MLflow experiment (SAFE)
+# -------------------------------------------------
+def set_experiment(experiment_name="dvc-pipeline-runs"):
+    setup_dagshub()   # 🔥 always initialize first
     mlflow.set_experiment(experiment_name)
+    print(f"✅ Experiment set: {experiment_name}")

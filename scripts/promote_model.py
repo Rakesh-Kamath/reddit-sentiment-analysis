@@ -9,18 +9,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.dagshub_config import setup_dagshub, set_experiment
 
-# 1. Authenticate with DagsHub
-dagshub.auth.add_app_token(
-    token=os.environ.get("DAGSHUB_TOKEN")
-)
+# Authenticate with DagsHub
+dagshub.auth.add_app_token(token=os.environ.get("DAGSHUB_TOKEN"))
 setup_dagshub()
 set_experiment()
 
 client = MlflowClient()
 
-MODEL_NAME = "reddit_sentiment_lgbm"   # must EXACTLY match registered model name
+MODEL_NAME = "reddit_sentiment_lgbm"
 
-# 3. Get latest model version
 versions = client.search_model_versions(f"name='{MODEL_NAME}'")
 
 if not versions:
@@ -28,9 +25,6 @@ if not versions:
 
 latest_version = max(int(v.version) for v in versions)
 
-# -------------------------------
-# 4. Promote to Production
-# -------------------------------
 client.transition_model_version_stage(
     name=MODEL_NAME,
     version=latest_version,

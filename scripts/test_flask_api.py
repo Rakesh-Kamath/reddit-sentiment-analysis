@@ -2,7 +2,8 @@ import pytest
 import requests
 import json
 
-BASE_URL = "http://localhost:5000"  # Replace with your deployed URL if needed
+BASE_URL = "http://localhost:5000"
+
 
 def test_predict_endpoint():
     data = {
@@ -11,6 +12,7 @@ def test_predict_endpoint():
     response = requests.post(f"{BASE_URL}/predict", json=data)
     assert response.status_code == 200, f"Request failed with status {response.status_code}: {response.text}"
     assert isinstance(response.json(), list)
+
 
 def test_predict_with_timestamps_endpoint():
     data = {
@@ -23,6 +25,7 @@ def test_predict_with_timestamps_endpoint():
     assert response.status_code == 200, f"Request failed with status {response.status_code}: {response.text}"
     assert all('sentiment' in item for item in response.json())
 
+
 def test_generate_chart_endpoint():
     data = {
         "sentiment_counts": {"1": 5, "0": 3, "-1": 2}
@@ -31,6 +34,7 @@ def test_generate_chart_endpoint():
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "image/png"
 
+
 def test_generate_wordcloud_endpoint():
     data = {
         "comments": ["Love this!", "Not so great.", "Absolutely amazing!", "Horrible experience."]
@@ -38,6 +42,7 @@ def test_generate_wordcloud_endpoint():
     response = requests.post(f"{BASE_URL}/generate_wordcloud", json=data)
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "image/png"
+
 
 def test_generate_trend_graph_endpoint():
     data = {

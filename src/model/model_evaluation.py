@@ -1,31 +1,20 @@
-import os
-import sys
-import json
-import pickle
 import logging
-import numpy as np
+import os
+import yaml
+import pickle
 import pandas as pd
-import joblib
-import mlflow
-import mlflow.sklearn
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import classification_report, confusion_matrix
-from mlflow.models import infer_signature
+import lightgbm as lgb
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.dagshub_config import setup_dagshub, set_experiment
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logger = logging.getLogger('model_evaluation')
+# Logging configuration
+logger = logging.getLogger('model_building')
 logger.setLevel(logging.DEBUG)
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 
-file_handler = logging.FileHandler('model_evaluation_errors.log')
+file_handler = logging.FileHandler('errors.log')
 file_handler.setLevel(logging.ERROR)
 
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -35,146 +24,124 @@ file_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
 
 def load_data(file_path: str) -> pd.DataFrame:
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Data file not found: {file_path}")
-    df = pd.read_csv(file_path)
-    df.fillna('', inplace=True)
-    logger.debug('Data loaded from %s  shape=%s', file_path, df.shape)
-    return df
+    """Load data from a CSV file."""
+    try:
+        df = pd.read_csv(file_path)
+        df.fillna('', inplace=True)
+        logger.debug('Data loaded and NaNs filled from %s', file_path)
+        return df
+    except pd.errors.ParserError as e:
+        logger.error('Failed to parse the CSV file: %s', e)
+        raise
+    except Exception as e:
+        logger.error('Unexpected error occurred while loading the data: %s', e)
+        raise
 
 
-def load_model(file_path: str):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Model not found: {file_path}")
-    with open(file_path, 'rb') as f:
-        model = pickle.load(f)
-    logger.debug('Model loaded from %s', file_path)
-    return model
+def apply_tfidf(train_data, max_features, ngram_range):
+    """Apply TF-IDF vectorization to the training data."""
+    try:
+        import joblib
+
+        os.makedirs('artifacts/models', exist_ok=True)
+        logger.debug("Created directory: artifacts/models")
+
+        tfidf_vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=ngram_range)
+
+        text_column = 'clean_comment' if 'clean_comment' in train_data.columns else 'processed_text'
+
+        X_train = tfidf_vectorizer.fit_transform(train_data[text_column])
+
+        y_train = train_data['category'] if 'category' in train_data.columns else train_data['label']
+
+        vectorizer_path = os.path.join('artifacts/models', 'tfidf_vectorizer.pkl')
+        joblib.dump(tfidf_vectorizer, vectorizer_path)
+        logger.debug(f"TF-IDF vectorizer saved to {vectorizer_path}")
+
+        return X_train, y_train
+
+    except Exception as e:
+        logger.error(f"Failed to apply TF-IDF feature engineering: {e}")
+        raise
 
 
-def load_vectorizer(file_path: str):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Vectorizer not found: {file_path}")
-    vectorizer = joblib.load(file_path)
-    logger.debug('Vectorizer loaded from %s', file_path)
-    return vectorizer
+def train_lgbm(X_train: np.ndarray, y_train: np.ndarray, learning_rate: float, max_depth: int, n_estimators: int):
+    """Train a LightGBM model using the provided training data and hyperparameters."""
+    try:
+        best_model = lgb.LGBMClassifier(
+            objective='multiclass',
+            num_class=3,
+            metric='multi_logloss',
+            is_unbalance=True,
+            class_weight='balanced',
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=n_estimators
+        )
+        best_model.fit(X_train, y_train)
+        logger.debug('LightGBM model trained successfully')
+        return best_model
+    except Exception as e:
+        logger.error('Failed to train the LightGBM model: %s', e)
+        raise
 
 
-def evaluate_model(model, X_test, y_test):
-    y_pred  = model.predict(X_test)
-    report  = classification_report(y_test, y_pred, output_dict=True)
-    cm      = confusion_matrix(y_test, y_pred)
-    logger.debug('Test accuracy: %.4f', report.get('accuracy', 0))
-    return report, cm
+def save_model(model, file_path: str) -> None:
+    """Save the trained model to a file."""
+    try:
+        with open(file_path, 'wb') as f:
+            pickle.dump(model, f)
+        logger.debug('Model saved successfully to %s', file_path)
+    except Exception as e:
+        logger.error('Failed to save the model: %s', e)
+        raise
 
 
-def log_confusion_matrix(cm, dataset_name: str):
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title(f'Confusion Matrix – {dataset_name}')
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    cm_path = f'confusion_matrix_{dataset_name.replace(" ", "_")}.png'
-    plt.savefig(cm_path)
-    mlflow.log_artifact(cm_path)
-    plt.close()
-    logger.debug('Confusion matrix saved to %s', cm_path)
+def load_params(params_path: str = "params.yaml") -> dict:
+    """Load parameters from a YAML file."""
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        full_path = os.path.join(root_dir, params_path)
 
-
-def save_model_info(run_id: str, model_path: str, file_path: str) -> None:
-    info = {
-        'run_id': run_id,
-        'model_path': model_path,
-        'timestamp': pd.Timestamp.now().isoformat(),
-    }
-    os.makedirs(os.path.dirname(file_path) if os.path.dirname(file_path) else '.', exist_ok=True)
-    with open(file_path, 'w') as f:
-        json.dump(info, f, indent=4)
-    logger.debug('Model info saved to %s', file_path)
+        with open(full_path, 'r') as file:
+            params = yaml.safe_load(file)
+        logger.debug('Parameters retrieved from %s', full_path)
+        return params
+    except FileNotFoundError:
+        logger.error('File not found: %s', full_path)
+        raise
 
 
 def main():
     try:
-        setup_dagshub()
-        set_experiment('dvc-pipeline-runs')
+        params = load_params('params.yaml')
 
-        with mlflow.start_run() as run:
-            import yaml
-            params_path = os.path.join(PROJECT_ROOT, 'params.yaml')
-            with open(params_path) as f:
-                params = yaml.safe_load(f)
-            for key, value in params.items():
-                mlflow.log_param(key, str(value))
+        max_features = params['model_building']['max_features']
+        ngram_range = tuple(params['model_building']['ngram_range'])
+        learning_rate = params['model_building']['learning_rate']
+        max_depth = params['model_building']['max_depth']
+        n_estimators = params['model_building']['n_estimators']
 
-            model_path      = os.path.join(PROJECT_ROOT, 'artifacts', 'models', 'lgbm_model.pkl')
-            vectorizer_path = os.path.join(PROJECT_ROOT, 'artifacts', 'models', 'tfidf_vectorizer.pkl')
-            test_path       = os.path.join(PROJECT_ROOT, 'artifacts', 'interim', 'test_processed.csv')
+        logger.debug(f"Model parameters loaded: max_features={max_features}, ngram_range={ngram_range}")
 
-            model      = load_model(model_path)
-            vectorizer = load_vectorizer(vectorizer_path)
-            test_data  = load_data(test_path)
+        train_data = load_data('artifacts/interim/train_processed.csv')
 
-            X_test = vectorizer.transform(test_data['clean_comment'].values)
-            y_test = test_data['category'].values
+        X_train_tfidf, y_train = apply_tfidf(train_data, max_features, ngram_range)
 
-            input_example = pd.DataFrame(
-                X_test[:5].toarray(),
-                columns=vectorizer.get_feature_names_out()
-            )
-            signature = infer_signature(input_example, model.predict(X_test[:5]))
+        best_model = train_lgbm(X_train_tfidf, y_train, learning_rate, max_depth, n_estimators)
 
-            mlflow.sklearn.log_model(
-                model, "lgbm_model",
-                signature=signature,
-                input_example=input_example,
-            )
+        os.makedirs('artifacts/models', exist_ok=True)
 
-            save_model_info(run.info.run_id, "lgbm_model",
-                            os.path.join(PROJECT_ROOT, 'experiment_info.json'))
+        save_model(best_model, 'artifacts/models/lgbm_model.pkl')
+        logger.debug('Model saved to artifacts/models/lgbm_model.pkl')
 
-            if os.path.exists(vectorizer_path):
-                mlflow.log_artifact(vectorizer_path)
-
-            report, cm = evaluate_model(model, X_test, y_test)
-
-            for label, metrics in report.items():
-                if isinstance(metrics, dict):
-                    try:
-                        mlflow.log_metrics({
-                            f"test_{label}_precision": metrics.get('precision', 0),
-                            f"test_{label}_recall":    metrics.get('recall', 0),
-                            f"test_{label}_f1":        metrics.get('f1-score', 0),
-                        })
-                    except Exception:
-                        pass
-
-            if 'accuracy' in report:
-                mlflow.log_metric("test_accuracy", report['accuracy'])
-
-            log_confusion_matrix(cm, "Test Data")
-
-            mlflow.set_tags({
-                "model_type": "LightGBM",
-                "task": "Sentiment Analysis",
-                "dataset": "Reddit Comments",
-            })
-
-            logger.info('Model evaluation complete.  Run ID: %s', run.info.run_id)
-            logger.info('Test accuracy: %.4f', report.get('accuracy', 0))
-
-    except FileNotFoundError as e:
-        logger.error('File not found: %s', e)
-        print(f"\nError: {e}")
-        print("Tip: run 'dvc repro' to generate all required files first.")
-        raise
-    except Exception as e:
-        logger.error('Evaluation failed: %s', e)
+    except KeyError as e:
+        logger.error(f"Missing key in params.yaml: {e}")
+        logger.error("Please ensure params.yaml contains all required model_building parameters")
         raise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
