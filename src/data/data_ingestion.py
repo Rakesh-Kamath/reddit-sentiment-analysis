@@ -4,28 +4,19 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import yaml
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger('data_ingestion')
 logger.setLevel(logging.DEBUG)
 
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
-
 file_handler = logging.FileHandler('errors.log')
 file_handler.setLevel(logging.ERROR)
-
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 file_handler.setFormatter(formatter)
-
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-# ---------------------------------------------------------------------------
-# Always resolve paths relative to the PROJECT ROOT, not the script location
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
@@ -34,23 +25,17 @@ def load_data(data_url: str) -> pd.DataFrame:
         df = pd.read_csv(data_url)
         logger.debug('Data loaded from %s', data_url)
         return df
-    except pd.errors.ParserError as e:
-        logger.error('Failed to parse the CSV file: %s', e)
-        raise
     except Exception as e:
         logger.error('Unexpected error occurred while loading the data: %s', e)
         raise
 
 
 def save_data(train_data: pd.DataFrame, test_data: pd.DataFrame, data_path: str) -> None:
-    """Save train/test splits.  data_path is treated as relative to PROJECT_ROOT."""
     try:
-        abs_path = os.path.join(PROJECT_ROOT, data_path)
+        abs_path = os.path.join(PROJECT_ROOT, *data_path.split('/'))
         os.makedirs(abs_path, exist_ok=True)
-
         train_data.to_csv(os.path.join(abs_path, "train.csv"), index=False)
         test_data.to_csv(os.path.join(abs_path, "test.csv"), index=False)
-
         logger.debug('Train and test data saved to %s', abs_path)
     except Exception as e:
         logger.error('Unexpected error occurred while saving the data: %s', e)
@@ -76,9 +61,6 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         df = df[df['clean_comment'].str.strip() != '']
         logger.debug('Preprocessing complete')
         return df
-    except KeyError as e:
-        logger.error('Missing column in the dataframe: %s', e)
-        raise
     except Exception as e:
         logger.error('Unexpected error during preprocessing: %s', e)
         raise

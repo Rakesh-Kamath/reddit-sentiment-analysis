@@ -6,36 +6,23 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
-# ---------------------------------------------------------------------------
-# NLTK downloads
-# ---------------------------------------------------------------------------
 for resource in ['punkt', 'wordnet', 'stopwords', 'omw-1.4']:
     nltk.download(resource, quiet=True)
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger('data_preprocessing')
 logger.setLevel(logging.DEBUG)
-
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
-
 file_handler = logging.FileHandler('errors.log')
 file_handler.setLevel(logging.ERROR)
-
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 file_handler.setFormatter(formatter)
-
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-# ---------------------------------------------------------------------------
-# Pre-load heavy resources once (not inside a loop)
-# ---------------------------------------------------------------------------
 STOP_WORDS = set(stopwords.words('english')) - {'not', 'but', 'however', 'no', 'yet', 'very', 'too', 'won'}
 LEMMATIZER = WordNetLemmatizer()
 
@@ -68,33 +55,26 @@ def preprocess_comment(comment: str) -> str:
         comment = re.sub(r'#(\w+)', r'\1', comment)
         comment = re.sub(r'[^A-Za-z0-9\s!?.,]', '', comment)
         comment = re.sub(r'\s+', ' ', comment).strip()
-
         for contraction, expansion in CONTRACTIONS.items():
             comment = comment.replace(contraction, expansion)
-
         comment = ' '.join(w for w in comment.split() if w not in STOP_WORDS)
         comment = ' '.join(LEMMATIZER.lemmatize(w, pos='v') for w in comment.split())
         comment = ' '.join(w for w in comment.split() if len(w) > 1)
-        comment = re.sub(r'\s+', ' ', comment).strip()
-        return comment
+        return re.sub(r'\s+', ' ', comment).strip()
     except Exception as e:
         logger.error('Error preprocessing comment: %s', e)
         raise
 
 
 def normalize_text(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        df['clean_comment'] = df['clean_comment'].apply(preprocess_comment)
-        logger.debug('Text normalisation complete')
-        return df
-    except Exception as e:
-        logger.error('Error during text normalisation: %s', e)
-        raise
+    df['clean_comment'] = df['clean_comment'].apply(preprocess_comment)
+    logger.debug('Text normalisation complete')
+    return df
 
 
 def save_data(train_data: pd.DataFrame, test_data: pd.DataFrame, data_path: str) -> None:
     try:
-        abs_path = os.path.join(PROJECT_ROOT, data_path)
+        abs_path = os.path.join(PROJECT_ROOT, *data_path.split('/'))
         os.makedirs(abs_path, exist_ok=True)
         train_data.to_csv(os.path.join(abs_path, "train_processed.csv"), index=False)
         test_data.to_csv(os.path.join(abs_path, "test_processed.csv"), index=False)
@@ -118,15 +98,12 @@ def main():
         test_processed  = normalize_text(test_data)
 
         save_data(train_processed, test_processed, data_path='artifacts/interim')
-        logger.debug('Processed data saved to artifacts/interim')
 
     except FileNotFoundError as e:
         logger.error('Data files not found: %s', e)
-        logger.error('Run data_ingestion first.')
         raise
     except Exception as e:
         logger.error('Failed to complete preprocessing: %s', e)
-        print(f"Error: {e}")
         raise
 
 
