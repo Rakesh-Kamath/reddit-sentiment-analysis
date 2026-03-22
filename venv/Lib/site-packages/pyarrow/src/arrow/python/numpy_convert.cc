@@ -46,7 +46,7 @@ NumPyBuffer::NumPyBuffer(PyObject* ao) : Buffer(nullptr, 0) {
     PyArrayObject* ndarray = reinterpret_cast<PyArrayObject*>(ao);
     auto ptr = reinterpret_cast<uint8_t*>(PyArray_DATA(ndarray));
     data_ = const_cast<const uint8_t*>(ptr);
-    size_ = PyArray_SIZE(ndarray) * PyArray_DESCR(ndarray)->elsize;
+    size_ = PyArray_NBYTES(ndarray);
     capacity_ = size_;
     is_mutable_ = !!(PyArray_FLAGS(ndarray) & NPY_ARRAY_WRITEABLE);
   }
@@ -150,7 +150,7 @@ Result<std::shared_ptr<DataType>> NumPyDtypeToArrow(PyArray_Descr* descr) {
     TO_ARROW_TYPE_CASE(UNICODE, utf8);
     case NPY_DATETIME: {
       auto date_dtype =
-          reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(descr->c_metadata);
+          reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(PyDataType_C_METADATA(descr));
       switch (date_dtype->meta.base) {
         case NPY_FR_s:
           return timestamp(TimeUnit::SECOND);
@@ -170,7 +170,7 @@ Result<std::shared_ptr<DataType>> NumPyDtypeToArrow(PyArray_Descr* descr) {
     } break;
     case NPY_TIMEDELTA: {
       auto timedelta_dtype =
-          reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(descr->c_metadata);
+          reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(PyDataType_C_METADATA(descr));
       switch (timedelta_dtype->meta.base) {
         case NPY_FR_s:
           return duration(TimeUnit::SECOND);
@@ -488,7 +488,13 @@ Status NdarraysToSparseCSFTensor(MemoryPool* pool, PyObject* data_ao, PyObject* 
   std::vector<std::shared_ptr<Tensor>> indices(ndim);
 
   for (int i = 0; i < ndim - 1; ++i) {
+#ifdef Py_GIL_DISABLED
+    PyObject* item = PySequence_ITEM(indptr_ao, i);
+    RETURN_IF_PYERROR();
+    OwnedRef item_ref(item);
+#else
     PyObject* item = PySequence_Fast_GET_ITEM(indptr_ao, i);
+#endif
     if (!PyArray_Check(item)) {
       return Status::TypeError("Did not pass ndarray object for indptr");
     }
@@ -497,7 +503,13 @@ Status NdarraysToSparseCSFTensor(MemoryPool* pool, PyObject* data_ao, PyObject* 
   }
 
   for (int i = 0; i < ndim; ++i) {
+#ifdef Py_GIL_DISABLED
+    PyObject* item = PySequence_ITEM(indices_ao, i);
+    RETURN_IF_PYERROR();
+    OwnedRef item_ref(item);
+#else
     PyObject* item = PySequence_Fast_GET_ITEM(indices_ao, i);
+#endif
     if (!PyArray_Check(item)) {
       return Status::TypeError("Did not pass ndarray object for indices");
     }
