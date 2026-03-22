@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Logging configuration
-logger = logging.getLogger('model_building')
+logger = logging.getLogger('model_evaluation')
 logger.setLevel(logging.DEBUG)
 
 console_handler = logging.StreamHandler()

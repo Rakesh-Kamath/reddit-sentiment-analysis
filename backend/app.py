@@ -6,17 +6,15 @@ from flask_cors import CORS
 import io
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
-import mlflow
 import numpy as np
 import joblib
+import pickle
 import re
 import pandas as pd
 import matplotlib.dates as mdates
 from dotenv import load_dotenv
 import os
-import sys
 import nltk
-from mlflow.tracking import MlflowClient
 
 # Load environment variables first
 load_dotenv()
@@ -41,16 +39,6 @@ try:
 except Exception as e:
     print(f"❌ CRITICAL NLTK ERROR: {e}")
 
-DAGSHUB_USERNAME = os.getenv('DAGSHUB_USERNAME', '').strip()
-DAGSHUB_TOKEN = os.getenv('DAGSHUB_TOKEN', '').strip()
-REPO_NAME = os.getenv('REPO_NAME', 'reddit-sentiment-analysis').strip()
-
-if DAGSHUB_TOKEN:
-    os.environ['MLFLOW_TRACKING_USERNAME'] = DAGSHUB_USERNAME
-    os.environ['MLFLOW_TRACKING_PASSWORD'] = DAGSHUB_TOKEN
-else:
-    print("WARNING: DAGSHUB_TOKEN not found in environment variables")
-
 app = Flask(__name__)
 CORS(app)
 
@@ -70,28 +58,44 @@ def preprocess_comment(comment):
         return comment
 
 
-def load_model_and_vectorizer(model_name, model_version, vectorizer_path):
-    """Load model and vectorizer from MLflow and local storage."""
+def load_model_and_vectorizer():
+    """Load model and vectorizer from local pickle files."""
     try:
-        tracking_uri = f"https://dagshub.com/{DAGSHUB_USERNAME}/{REPO_NAME}.mlflow"
-        mlflow.set_tracking_uri(tracking_uri)
-
-        model_uri = f"models:/{model_name}/{model_version}"
-        model = mlflow.pyfunc.load_model(model_uri)
-
         base_dir = os.path.dirname(__file__)
-        candidates = [
-            os.path.join(base_dir, 'models', 'tfidf_vectorizer.pkl'),
+
+        # Find vectorizer
+        vectorizer_candidates = [
             os.path.join(base_dir, '..', 'artifacts', 'models', 'tfidf_vectorizer.pkl'),
-            vectorizer_path,
+            os.path.join(base_dir, 'models', 'tfidf_vectorizer.pkl'),
+            os.path.join(base_dir, 'tfidf_vectorizer.pkl'),
         ]
-        for path in candidates:
+        vectorizer = None
+        for path in vectorizer_candidates:
             if os.path.exists(path):
                 vectorizer = joblib.load(path)
-                print(f"✅ Model and vectorizer loaded successfully from {path}")
-                return model, vectorizer
+                print(f"✅ Vectorizer loaded from {path}")
+                break
 
-        raise FileNotFoundError(f"Vectorizer not found. Tried: {candidates}")
+        # Find model
+        model_candidates = [
+            os.path.join(base_dir, '..', 'artifacts', 'models', 'lgbm_model.pkl'),
+            os.path.join(base_dir, 'models', 'lgbm_model.pkl'),
+            os.path.join(base_dir, 'lgbm_model.pkl'),
+        ]
+        model = None
+        for path in model_candidates:
+            if os.path.exists(path):
+                with open(path, 'rb') as f:
+                    model = pickle.load(f)
+                print(f"✅ Model loaded from {path}")
+                break
+
+        if model is None:
+            raise FileNotFoundError("Could not find lgbm_model.pkl")
+        if vectorizer is None:
+            raise FileNotFoundError("Could not find tfidf_vectorizer.pkl")
+
+        return model, vectorizer
 
     except Exception as e:
         print(f"❌ Error loading model and vectorizer: {e}")
@@ -99,14 +103,21 @@ def load_model_and_vectorizer(model_name, model_version, vectorizer_path):
 
 
 try:
-    model, vectorizer = load_model_and_vectorizer(
-        "reddit_sentiment_lgbm",
-        "Staging",
-        "models/tfidf_vectorizer.pkl"
-    )
+    model, vectorizer = load_model_and_vectorizer()
 except Exception as e:
     print(f"CRITICAL: Failed to load model: {e}")
     model, vectorizer = None, None
+
+
+def transform_comments(comments):
+    """Preprocess and vectorize a list of comments."""
+    preprocessed = [preprocess_comment(c) for c in comments]
+    transformed = vectorizer.transform(preprocessed)
+    if hasattr(vectorizer, 'get_feature_names_out'):
+        feature_names = vectorizer.get_feature_names_out()
+    else:
+        feature_names = vectorizer.get_feature_names()
+    return pd.DataFrame(transformed.toarray(), columns=feature_names)
 
 
 @app.route('/')
@@ -116,84 +127,62 @@ def home():
         "status": "running",
         "model_loaded": model is not None,
         "endpoints": {
-            "/": "This message",
-            "/predict": "POST - Predict sentiment for comments"
+            "/predict": "POST - Predict sentiment for comments",
+            "/predict_with_timestamps": "POST - Predict with timestamps",
+            "/generate_chart": "POST - Generate pie chart",
+            "/generate_wordcloud": "POST - Generate word cloud",
+            "/generate_trend_graph": "POST - Generate trend graph",
         }
     })
-
-
-@app.route('/predict_with_timestamps', methods=['POST'])
-def predict_with_timestamps():
-    if model is None or vectorizer is None:
-        return jsonify({"error": "Model or vectorizer not loaded"}), 503
-    data = request.json
-    comments_data = data.get('comments')
-
-    if not comments_data:
-        return jsonify({"error": "No comments provided"}), 400
-
-    try:
-        comments = [item['text'] for item in comments_data]
-        timestamps = [item['timestamp'] for item in comments_data]
-
-        preprocessed_comments = [preprocess_comment(comment) for comment in comments]
-        transformed_comments = vectorizer.transform(preprocessed_comments)
-
-        if hasattr(vectorizer, 'get_feature_names_out'):
-            feature_names = vectorizer.get_feature_names_out()
-        else:
-            feature_names = vectorizer.get_feature_names()
-
-        transformed_comments_df = pd.DataFrame(transformed_comments.toarray(), columns=feature_names)
-
-        predictions = model.predict(transformed_comments_df).tolist()
-        predictions = [str(pred) for pred in predictions]
-    except Exception as e:
-        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
-
-    response = [
-        {"comment": comment, "sentiment": sentiment, "timestamp": timestamp}
-        for comment, sentiment, timestamp in zip(comments, predictions, timestamps)
-    ]
-    return jsonify(response)
 
 
 @app.route('/predict', methods=['POST'])
 def predict():
     if model is None or vectorizer is None:
         return jsonify({"error": "Model or vectorizer not loaded"}), 503
-    data = request.json
-    comments = data.get('comments')
 
+    comments = request.json.get('comments')
     if not comments:
         return jsonify({"error": "No comments provided"}), 400
 
     try:
-        preprocessed_comments = [preprocess_comment(comment) for comment in comments]
-        transformed_comments = vectorizer.transform(preprocessed_comments)
-
-        if hasattr(vectorizer, 'get_feature_names_out'):
-            feature_names = vectorizer.get_feature_names_out()
-        else:
-            feature_names = vectorizer.get_feature_names()
-
-        transformed_comments_df = pd.DataFrame(transformed_comments.toarray(), columns=feature_names)
-
-        predictions = model.predict(transformed_comments_df).tolist()
-        predictions = [str(pred) for pred in predictions]
+        df = transform_comments(comments)
+        predictions = [str(p) for p in model.predict(df.values).tolist()]
     except Exception as e:
         return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
 
-    response = [{"comment": comment, "sentiment": category} for comment, category in zip(comments, predictions)]
+    response = [{"comment": c, "sentiment": s} for c, s in zip(comments, predictions)]
+    return jsonify(response)
+
+
+@app.route('/predict_with_timestamps', methods=['POST'])
+def predict_with_timestamps():
+    if model is None or vectorizer is None:
+        return jsonify({"error": "Model or vectorizer not loaded"}), 503
+
+    data = request.json.get('comments')
+    if not data:
+        return jsonify({"error": "No comments provided"}), 400
+
+    try:
+        comments = [item['text'] for item in data]
+        timestamps = [item['timestamp'] for item in data]
+        df = transform_comments(comments)
+        predictions = [str(p) for p in model.predict(df.values).tolist()]
+    except Exception as e:
+        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
+
+    response = [
+        {"comment": c, "sentiment": s, "timestamp": t}
+        for c, s, t in zip(comments, predictions, timestamps)
+    ]
     return jsonify(response)
 
 
 @app.route('/generate_chart', methods=['POST'])
 def generate_chart():
     try:
-        data = request.get_json()
-        sentiment_counts = data.get('sentiment_counts')
-
+        sentiment_counts = request.get_json().get('sentiment_counts')
         if not sentiment_counts:
             return jsonify({"error": "No sentiment counts provided"}), 400
 
@@ -204,19 +193,13 @@ def generate_chart():
             int(sentiment_counts.get('-1', 0))
         ]
         if sum(sizes) == 0:
-            raise ValueError("Sentiment counts sum to zero")
+            return jsonify({"error": "All sentiment counts are zero"}), 400
 
         colors = ['#36A2EB', '#C9CBCF', '#FF6384']
 
         plt.figure(figsize=(6, 6))
-        plt.pie(
-            sizes,
-            labels=labels,
-            colors=colors,
-            autopct='%1.1f%%',
-            startangle=140,
-            textprops={'color': 'w'}
-        )
+        plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%',
+                startangle=140, textprops={'color': 'w'})
         plt.axis('equal')
 
         img_io = io.BytesIO()
@@ -226,23 +209,20 @@ def generate_chart():
 
         return send_file(img_io, mimetype='image/png')
     except Exception as e:
-        app.logger.error(f"Error in /generate_chart: {e}")
         return jsonify({"error": f"Chart generation failed: {str(e)}"}), 500
 
 
 @app.route('/generate_wordcloud', methods=['POST'])
 def generate_wordcloud():
     try:
-        data = request.get_json()
-        comments = data.get('comments')
-
+        comments = request.get_json().get('comments')
         if not comments:
             return jsonify({"error": "No comments provided"}), 400
 
-        preprocessed_comments = [preprocess_comment(comment) for comment in comments]
-        text = ' '.join(preprocessed_comments)
+        preprocessed = [preprocess_comment(c) for c in comments]
+        text = ' '.join(preprocessed)
 
-        wordcloud = WordCloud(
+        wc = WordCloud(
             width=800,
             height=400,
             background_color='black',
@@ -252,54 +232,41 @@ def generate_wordcloud():
         ).generate(text)
 
         img_io = io.BytesIO()
-        wordcloud.to_image().save(img_io, format='PNG')
+        wc.to_image().save(img_io, format='PNG')
         img_io.seek(0)
 
         return send_file(img_io, mimetype='image/png')
     except Exception as e:
-        app.logger.error(f"Error in /generate_wordcloud: {e}")
         return jsonify({"error": f"Word cloud generation failed: {str(e)}"}), 500
 
 
 @app.route('/generate_trend_graph', methods=['POST'])
 def generate_trend_graph():
     try:
-        data = request.get_json()
-        sentiment_data = data.get('sentiment_data')
-
+        sentiment_data = request.get_json().get('sentiment_data')
         if not sentiment_data:
             return jsonify({"error": "No sentiment data provided"}), 400
 
         df = pd.DataFrame(sentiment_data)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df.set_index('timestamp', inplace=True)
         df['sentiment'] = df['sentiment'].astype(int)
+        df.set_index('timestamp', inplace=True)
 
-        sentiment_labels = {-1: 'Negative', 0: 'Neutral', 1: 'Positive'}
+        monthly = df.resample('M')['sentiment'].value_counts().unstack(fill_value=0)
+        totals = monthly.sum(axis=1)
+        pct = (monthly.T / totals).T * 100
 
-        monthly_counts = df.resample('M')['sentiment'].value_counts().unstack(fill_value=0)
-        monthly_totals = monthly_counts.sum(axis=1)
-        monthly_percentages = (monthly_counts.T / monthly_totals).T * 100
-
-        for sentiment_value in [-1, 0, 1]:
-            if sentiment_value not in monthly_percentages.columns:
-                monthly_percentages[sentiment_value] = 0
-
-        monthly_percentages = monthly_percentages[[-1, 0, 1]]
-
-        plt.figure(figsize=(12, 6))
+        for v in [-1, 0, 1]:
+            if v not in pct.columns:
+                pct[v] = 0
+        pct = pct[[-1, 0, 1]]
 
         colors = {-1: 'red', 0: 'gray', 1: 'green'}
+        labels = {-1: 'Negative', 0: 'Neutral', 1: 'Positive'}
 
-        for sentiment_value in [-1, 0, 1]:
-            plt.plot(
-                monthly_percentages.index,
-                monthly_percentages[sentiment_value],
-                marker='o',
-                linestyle='-',
-                label=sentiment_labels[sentiment_value],
-                color=colors[sentiment_value]
-            )
+        plt.figure(figsize=(12, 6))
+        for v in [-1, 0, 1]:
+            plt.plot(pct.index, pct[v], marker='o', label=labels[v], color=colors[v])
 
         plt.title('Monthly Sentiment Percentage Over Time')
         plt.xlabel('Month')
@@ -318,7 +285,6 @@ def generate_trend_graph():
 
         return send_file(img_io, mimetype='image/png')
     except Exception as e:
-        app.logger.error(f"Error in /generate_trend_graph: {e}")
         return jsonify({"error": f"Trend graph generation failed: {str(e)}"}), 500
 
 
